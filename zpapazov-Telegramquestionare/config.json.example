@@ -1,0 +1,11 @@
+{
+  "BotToken": "YOUR_TELEGRAM_BOT_TOKEN",
+  "AdminUserIds": [ 123456789 ],
+  "MonitoredGroupId": null,
+  "GroupLinks": {
+    "Beginner":     "https://t.me/+BEGINNER_LINK",
+    "Intermediate": "https://t.me/+INTERMEDIATE_LINK",
+    "Advanced":     "https://t.me/+ADVANCED_LINK",
+    "Expert":       "https://t.me/+EXPERT_LINK"
+  }
+}

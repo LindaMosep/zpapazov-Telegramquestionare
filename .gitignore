@@ -1,6 +1,6 @@
-# .env files (contains secrets)
-.env
-**/.env
+# Config file (contains secrets)
+config.json
+**/config.json
 
 # Build outputs
 bin/

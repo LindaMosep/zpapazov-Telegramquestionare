@@ -1,4 +1,5 @@
 using System.Text.Json;
+using System.Text.Json.Serialization;
 using Telegram.Bot;
 using Telegram.Bot.Polling;
 using Telegram.Bot.Types;
@@ -6,49 +7,46 @@ using Telegram.Bot.Types.Enums;
 using Telegram.Bot.Types.ReplyMarkups;
 
 // ──────────────────────────────────────────────
-// Load .env file if present
+// Load config.json
 // ──────────────────────────────────────────────
-var envFile = Path.Combine(AppContext.BaseDirectory, ".env");
-if (!File.Exists(envFile))
-    envFile = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "..", "..", "..", ".env");
+var configFile = Path.Combine(AppContext.BaseDirectory, "config.json");
+if (!File.Exists(configFile))
+    configFile = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "..", "..", "..", "config.json");
 
-if (File.Exists(envFile))
+if (!File.Exists(configFile))
+    throw new FileNotFoundException("config.json not found. Copy config.json.example to config.json and fill in your values.");
+
+var appConfig = JsonSerializer.Deserialize<AppConfig>(File.ReadAllText(configFile),
+    new JsonSerializerOptions { PropertyNameCaseInsensitive = true })
+    ?? throw new InvalidOperationException("Failed to parse config.json.");
+
+var botToken      = appConfig.BotToken      ?? throw new InvalidOperationException("BotToken is missing in config.json.");
+var adminUserIds  = appConfig.AdminUserIds  ?? [];
+var groupLinks    = appConfig.GroupLinks    ?? new Dictionary<string, string>();
+var monitoredGroupId = appConfig.MonitoredGroupId;
+
+// ──────────────────────────────────────────────
+// User level persistence
+// ──────────────────────────────────────────────
+var userLevelsFilePath = Path.Combine(AppContext.BaseDirectory, "user_levels.json");
+var userLevels = LoadUserLevels();
+
+Dictionary<long, string> LoadUserLevels()
 {
-    foreach (var line in File.ReadAllLines(envFile))
+    if (File.Exists(userLevelsFilePath))
     {
-        var trimmed = line.Trim();
-        if (trimmed.Length == 0 || trimmed.StartsWith('#')) continue;
-        var eq = trimmed.IndexOf('=');
-        if (eq <= 0) continue;
-        var key = trimmed[..eq].Trim();
-        var value = trimmed[(eq + 1)..].Trim().Trim('"');
-        Environment.SetEnvironmentVariable(key, value);
+        var json = File.ReadAllText(userLevelsFilePath);
+        return JsonSerializer.Deserialize<Dictionary<long, string>>(json) ?? new();
     }
+    return new();
 }
 
-// ──────────────────────────────────────────────
-// Configuration
-// ──────────────────────────────────────────────
-var botToken = Environment.GetEnvironmentVariable("TELEGRAM_BOT_TOKEN")
-    ?? throw new InvalidOperationException(
-        "Set the TELEGRAM_BOT_TOKEN environment variable before running the bot.");
-
-long[] adminUserIds = Environment.GetEnvironmentVariable("ADMIN_USER_IDS")
-    ?.Split(',', StringSplitOptions.RemoveEmptyEntries)
-    .Select(long.Parse)
-    .ToArray() ?? [];
-
-var groupLinks = new Dictionary<string, string>
+void SaveUserLevels()
 {
-    ["Beginner"]     = Environment.GetEnvironmentVariable("BEGINNER_GROUP_LINK")     ?? "https://t.me/+BEGINNER_GROUP_LINK",
-    ["Intermediate"] = Environment.GetEnvironmentVariable("INTERMEDIATE_GROUP_LINK") ?? "https://t.me/+INTERMEDIATE_GROUP_LINK",
-    ["Advanced"]     = Environment.GetEnvironmentVariable("ADVANCED_GROUP_LINK")     ?? "https://t.me/+ADVANCED_GROUP_LINK",
-    ["Expert"]       = Environment.GetEnvironmentVariable("EXPERT_GROUP_LINK")       ?? "https://t.me/+EXPERT_GROUP_LINK",
-};
+    var json = JsonSerializer.Serialize(userLevels, new JsonSerializerOptions { WriteIndented = true });
+    File.WriteAllText(userLevelsFilePath, json);
+}
 
-// ──────────────────────────────────────────────
-// Questions – loaded from JSON
-// ──────────────────────────────────────────────
 var questionsFilePath = Path.Combine(AppContext.BaseDirectory, "questions.json");
 
 if (!System.IO.File.Exists(questionsFilePath))
@@ -95,7 +93,7 @@ bot.StartReceiving(
     errorHandler: HandleErrorAsync,
     receiverOptions: new ReceiverOptions
     {
-        AllowedUpdates = [UpdateType.Message, UpdateType.CallbackQuery],
+        AllowedUpdates = [UpdateType.Message, UpdateType.CallbackQuery, UpdateType.ChatMember, UpdateType.MyChatMember],
         DropPendingUpdates = true
     },
     cancellationToken: cts.Token
@@ -118,12 +116,66 @@ async Task HandleUpdateAsync(ITelegramBotClient client, Update update, Cancellat
         await HandleMessage(client, update.Message, text, ct);
     else if (update.Type == UpdateType.CallbackQuery && update.CallbackQuery is { } callback)
         await HandleCallback(client, callback, ct);
+    else if (update.Type == UpdateType.ChatMember && update.ChatMember is { } chatMemberUpdate)
+        await HandleChatMember(client, chatMemberUpdate, ct);
+    else if (update.Type == UpdateType.MyChatMember && update.MyChatMember is { } myChatMember)
+    {
+        var newStatus = myChatMember.NewChatMember.Status;
+        if (newStatus is ChatMemberStatus.Member or ChatMemberStatus.Administrator)
+            Console.WriteLine($"[Group] Bot added to group: {myChatMember.Chat.Title} (ID: {myChatMember.Chat.Id})");
+    }
 }
 
 async Task HandleErrorAsync(ITelegramBotClient client, Exception ex, HandleErrorSource source, CancellationToken ct)
 {
     Console.WriteLine($"[Error] {source}: {ex.Message}");
     await Task.CompletedTask;
+}
+
+// ──────────────────────────────────────────────
+// ChatMember handler — assign tag when user joins monitored group
+// ──────────────────────────────────────────────
+async Task HandleChatMember(ITelegramBotClient client, ChatMemberUpdated update, CancellationToken ct)
+{
+    if (monitoredGroupId == null || update.Chat.Id != monitoredGroupId) return;
+
+    var newStatus = update.NewChatMember.Status;
+    var oldStatus = update.OldChatMember.Status;
+    var userId = update.NewChatMember.User.Id;
+
+    bool isJoining = newStatus is ChatMemberStatus.Member or ChatMemberStatus.Administrator;
+    bool wasOutside = oldStatus is ChatMemberStatus.Left or ChatMemberStatus.Kicked or ChatMemberStatus.Restricted;
+
+    if (isJoining && wasOutside && userLevels.TryGetValue(userId, out var level))
+        await AssignTag(client, monitoredGroupId.Value, userId, level, ct);
+}
+
+// ──────────────────────────────────────────────
+// Tag helpers
+// ──────────────────────────────────────────────
+async Task TryAssignTagIfInGroup(ITelegramBotClient client, long userId, string category, CancellationToken ct)
+{
+    if (!monitoredGroupId.HasValue) return;
+    try
+    {
+        var member = await client.GetChatMember(monitoredGroupId.Value, userId, ct);
+        if (member.Status is ChatMemberStatus.Member or ChatMemberStatus.Administrator or ChatMemberStatus.Creator)
+            await AssignTag(client, monitoredGroupId.Value, userId, category, ct);
+    }
+    catch { /* user not in group */ }
+}
+
+async Task AssignTag(ITelegramBotClient client, long groupId, long userId, string category, CancellationToken ct)
+{
+    try
+    {
+        await client.SetChatMemberTag(groupId, userId, category, ct);
+        Console.WriteLine($"[Tag] Assigned '{category}' to user {userId} in group {groupId}");
+    }
+    catch (Exception ex)
+    {
+        Console.WriteLine($"[Tag] Failed for user {userId}: {ex.Message}");
+    }
 }
 
 // ──────────────────────────────────────────────
@@ -331,6 +383,11 @@ async Task SendResult(ITelegramBotClient client, long chatId, Step step, Cancell
     var score = total.ToString("F2");
     var link = groupLinks.GetValueOrDefault(category) ?? "https://t.me/+DEFAULT_LINK";
 
+    // Persist level and assign tag if already in monitored group
+    userLevels[step.UserId] = category;
+    SaveUserLevels();
+    await TryAssignTagIfInGroup(client, step.UserId, category, ct);
+
     var resultMessage = string.Format(Strings.Get(lang, "result"), rank, category, score, link);
 
     await client.SendMessage(chatId, resultMessage, cancellationToken: ct);
@@ -429,4 +486,12 @@ class Answer
 {
     public Dictionary<string, string> Text { get; set; } = [];
     public double Points { get; set; }
+}
+
+class AppConfig
+{
+    public string? BotToken { get; set; }
+    public long[] AdminUserIds { get; set; } = [];
+    public long? MonitoredGroupId { get; set; }
+    public Dictionary<string, string> GroupLinks { get; set; } = new();
 }

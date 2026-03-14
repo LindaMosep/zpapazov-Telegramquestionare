@@ -1,0 +1,14 @@
+# .env files (contains secrets)
+.env
+**/.env
+
+# Build outputs
+bin/
+obj/
+
+# Visual Studio
+.vs/
+*.user
+
+# NuGet
+*.nupkg

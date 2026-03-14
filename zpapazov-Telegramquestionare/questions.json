@@ -1,0 +1,64 @@
+{
+  "questions": [
+    {
+      "text": {
+        "en": "How long have you been playing tennis?",
+        "bg": "От колко време играете тенис?"
+      },
+      "answers": [
+        { "text": { "en": "Less than 1 year",    "bg": "По-малко от 1 година" }, "points": 0.0 },
+        { "text": { "en": "1-3 years",            "bg": "1-3 години"           }, "points": 0.2 },
+        { "text": { "en": "3-5 years",            "bg": "3-5 години"           }, "points": 0.3 },
+        { "text": { "en": "More than 5 years",    "bg": "Повече от 5 години"   }, "points": 0.5 }
+      ]
+    },
+    {
+      "text": {
+        "en": "How often do you play per week?",
+        "bg": "Колко пъти седмично играете?"
+      },
+      "answers": [
+        { "text": { "en": "Rarely / just starting",  "bg": "Рядко / тъкмо започвам" }, "points": 0.0 },
+        { "text": { "en": "1-2 times",               "bg": "1-2 пъти"               }, "points": 0.1 },
+        { "text": { "en": "3-4 times",               "bg": "3-4 пъти"               }, "points": 0.2 },
+        { "text": { "en": "5+ times",                "bg": "5+ пъти"                }, "points": 0.3 }
+      ]
+    },
+    {
+      "text": {
+        "en": "Can you consistently rally from the baseline?",
+        "bg": "Можете ли стабилно да разменяте удари от основната линия?"
+      },
+      "answers": [
+        { "text": { "en": "No, I'm still learning",         "bg": "Не, все още уча"             }, "points": 0.0 },
+        { "text": { "en": "Sometimes",                      "bg": "Понякога"                    }, "points": 0.1 },
+        { "text": { "en": "Yes, comfortably",               "bg": "Да, без проблем"             }, "points": 0.2 },
+        { "text": { "en": "Yes, with spin and placement",   "bg": "Да, с ефект и насочване"     }, "points": 0.3 }
+      ]
+    },
+    {
+      "text": {
+        "en": "How would you describe your serve?",
+        "bg": "Как бихте описали сервиса си?"
+      },
+      "answers": [
+        { "text": { "en": "I just get it in",                       "bg": "Просто го вкарвам в игра"          }, "points": 0.0 },
+        { "text": { "en": "Consistent but not powerful",           "bg": "Стабилен, но не мощен"             }, "points": 0.1 },
+        { "text": { "en": "Strong with moderate accuracy",         "bg": "Силен с умерена точност"           }, "points": 0.2 },
+        { "text": { "en": "Powerful with spin and placement",      "bg": "Мощен с ефект и насочване"         }, "points": 0.2 }
+      ]
+    },
+    {
+      "text": {
+        "en": "Have you played in competitive matches or tournaments?",
+        "bg": "Участвали ли сте в състезателни мачове или турнири?"
+      },
+      "answers": [
+        { "text": { "en": "Never",                              "bg": "Никога"                         }, "points": 0.0  },
+        { "text": { "en": "A few casual matches",              "bg": "Няколко неофициални мача"       }, "points": 0.05 },
+        { "text": { "en": "Club-level tournaments",            "bg": "Клубни турнири"                 }, "points": 0.1  },
+        { "text": { "en": "Regional or higher-level competitions", "bg": "Регионални или по-висши турнири" }, "points": 0.2  }
+      ]
+    }
+  ]
+}

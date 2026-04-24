@@ -16,8 +16,10 @@ if (!File.Exists(configFile))
 if (!File.Exists(configFile))
     throw new FileNotFoundException("config.json not found. Copy config.json.example to config.json and fill in your values.");
 
+Console.WriteLine(File.ReadAllText(configFile));
+
 var appConfig = JsonSerializer.Deserialize<AppConfig>(File.ReadAllText(configFile),
-    new JsonSerializerOptions { PropertyNameCaseInsensitive = true })
+    new JsonSerializerOptions { PropertyNameCaseInsensitive = false })
     ?? throw new InvalidOperationException("Failed to parse config.json.");
 
 var botToken      = appConfig.BotToken      ?? throw new InvalidOperationException("BotToken is missing in config.json.");
@@ -113,7 +115,11 @@ catch (OperationCanceledException) { }
 async Task HandleUpdateAsync(ITelegramBotClient client, Update update, CancellationToken ct)
 {
     if (update.Type == UpdateType.Message && update.Message?.Text is { } text)
+    {
+        var from = update.Message.From;
+        Console.WriteLine($"[MSG] {from?.Username ?? from?.FirstName ?? "unknown"} ({from?.Id}): {text}");
         await HandleMessage(client, update.Message, text, ct);
+    }
     else if (update.Type == UpdateType.CallbackQuery && update.CallbackQuery is { } callback)
         await HandleCallback(client, callback, ct);
     else if (update.Type == UpdateType.ChatMember && update.ChatMember is { } chatMemberUpdate)
@@ -146,8 +152,27 @@ async Task HandleChatMember(ITelegramBotClient client, ChatMemberUpdated update,
     bool isJoining = newStatus is ChatMemberStatus.Member or ChatMemberStatus.Administrator;
     bool wasOutside = oldStatus is ChatMemberStatus.Left or ChatMemberStatus.Kicked or ChatMemberStatus.Restricted;
 
-    if (isJoining && wasOutside && userLevels.TryGetValue(userId, out var level))
-        await AssignTag(client, monitoredGroupId.Value, userId, level, ct);
+    if (isJoining && wasOutside)
+    {
+        if (userLevels.TryGetValue(userId, out var level))
+            await AssignTag(client, monitoredGroupId.Value, userId, level, ct);
+
+        // Send welcome DM
+        try
+        {
+            var rank = userLevels.TryGetValue(userId, out var lvl)
+                ? lvl
+                : "Unknown";
+            var welcomeMsg =
+                $"{Strings.Get("en", "welcome_group")}\n\n" +
+                $"{Strings.Get("bg", "welcome_group")}";
+            await client.SendMessage(userId, welcomeMsg, cancellationToken: ct);
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[Welcome DM] Could not send to {userId}: {ex.Message}");
+        }
+    }
 }
 
 // ──────────────────────────────────────────────
@@ -155,20 +180,29 @@ async Task HandleChatMember(ITelegramBotClient client, ChatMemberUpdated update,
 // ──────────────────────────────────────────────
 async Task TryAssignTagIfInGroup(ITelegramBotClient client, long userId, string category, CancellationToken ct)
 {
+    Console.WriteLine("burada2");
+
     if (!monitoredGroupId.HasValue) return;
     try
     {
+        Console.WriteLine("burada2.5");
+
         var member = await client.GetChatMember(monitoredGroupId.Value, userId, ct);
         if (member.Status is ChatMemberStatus.Member or ChatMemberStatus.Administrator or ChatMemberStatus.Creator)
             await AssignTag(client, monitoredGroupId.Value, userId, category, ct);
+
+        Console.WriteLine("burada2.9");
     }
-    catch { /* user not in group */ }
+    catch (Exception ex){
+        Console.WriteLine(ex);
+    }
 }
 
 async Task AssignTag(ITelegramBotClient client, long groupId, long userId, string category, CancellationToken ct)
 {
     try
     {
+        Console.WriteLine("burada3");
         await client.SetChatMemberTag(groupId, userId, category, ct);
         Console.WriteLine($"[Tag] Assigned '{category}' to user {userId} in group {groupId}");
     }
@@ -185,6 +219,12 @@ async Task HandleMessage(ITelegramBotClient client, Message message, string text
 {
     var chatId = message.Chat.Id;
     var userId = message.From!.Id;
+
+    if (message.Chat.Type != ChatType.Private)
+    {
+        Console.WriteLine($"[GROUP] {message.Chat.Title} ({message.Chat.Id}) | {message.From?.Username ?? message.From?.FirstName ?? "unknown"}: {text}");
+        return;
+    }
 
     // Admin edit mode: expect raw JSON
     if (steps.TryGetValue(userId, out var currentStep) && currentStep.Stage == StepStage.EditingQuestions)
@@ -221,8 +261,6 @@ async Task HandleMessage(ITelegramBotClient client, Message message, string text
     switch (text.Split(' ')[0].ToLowerInvariant())
     {
         case "/start":
-            steps[userId] = new Step(userId, chatId, StepStage.SelectingLanguage);
-            // Greeting is shown before language is chosen, so send both languages
             await client.SendMessage(chatId,
                 "Hello! To help us direct you to the right group, please answer the following questions.\n\n" +
                 "Здравейте! За да ви насочим към правилната група, моля отговорете на следните въпроси.",
@@ -256,8 +294,7 @@ async Task HandleMessage(ITelegramBotClient client, Message message, string text
             break;
 
         default:
-            var lang = steps.TryGetValue(userId, out var s) ? s.Language : "en";
-            await client.SendMessage(chatId, Strings.Get(lang, "use_start"), cancellationToken: ct);
+            await client.SendMessage(chatId, Strings.Get("en", "use_start"), cancellationToken: ct);
             break;
     }
 }
@@ -273,36 +310,28 @@ async Task HandleCallback(ITelegramBotClient client, CallbackQuery callback, Can
 
     await client.AnswerCallbackQuery(callback.Id, cancellationToken: ct);
 
-    if (!steps.TryGetValue(userId, out var step))
+    // Language selection — stateless, just start question 0
+    if (data.StartsWith("lang:"))
     {
-        await client.SendMessage(chatId, Strings.Get("en", "session_expired"), cancellationToken: ct);
+        var lang = data["lang:".Length..];
+        await SendQuestion(client, chatId, 0, lang, 0.0, ct);
         return;
     }
 
-    // Language selection
-    if (step.Stage == StepStage.SelectingLanguage && data.StartsWith("lang:"))
-    {
-        step.Language = data["lang:".Length..];
-        step.Stage = StepStage.AnsweringQuestions;
-        step.CurrentQuestionIndex = 0;
-        step.TotalPoints = 0;
-        await SendQuestion(client, chatId, step, ct);
-        return;
-    }
-
-    // Answer selection
-    if (step.Stage == StepStage.AnsweringQuestions && data.StartsWith("ans:"))
+    // Answer selection — format: ans:{qIndex}:{aIndex}:{lang}:{totalPoints}
+    if (data.StartsWith("ans:"))
     {
         var parts = data["ans:".Length..].Split(':');
-        if (parts.Length == 2
+        if (parts.Length == 4
             && int.TryParse(parts[0], out var qIndex)
             && int.TryParse(parts[1], out var aIndex)
-            && qIndex == step.CurrentQuestionIndex
+            && double.TryParse(parts[3], System.Globalization.NumberStyles.Any, System.Globalization.CultureInfo.InvariantCulture, out var prevPoints)
             && qIndex < questions.Count
             && aIndex < questions[qIndex].Answers.Count)
         {
+            var lang = parts[2];
+
             // Edit the question message to show the selected answer
-            var lang = step.Language;
             var q = questions[qIndex];
             var questionText = q.Text.GetValueOrDefault(lang) ?? q.Text.GetValueOrDefault("en") ?? "Question";
             var header = string.Format(Strings.Get(lang, "question_header"), qIndex + 1, questions.Count);
@@ -311,19 +340,16 @@ async Task HandleCallback(ITelegramBotClient client, CallbackQuery callback, Can
                 var text = a.Text.GetValueOrDefault(lang) ?? a.Text.GetValueOrDefault("en") ?? $"Option {i + 1}";
                 return i == aIndex ? $"✅ {text}" : $"▫️ {text}";
             });
-            var editedText = $"{header}\n\n{questionText}\n\n{string.Join("\n", answerLines)}";
-            await client.EditMessageText(chatId, callback.Message!.MessageId, editedText, cancellationToken: ct);
+            await client.EditMessageText(chatId, callback.Message!.MessageId,
+                $"{header}\n\n{questionText}\n\n{string.Join("\n", answerLines)}", cancellationToken: ct);
 
-            step.TotalPoints += questions[qIndex].Answers[aIndex].Points;
-            step.CurrentQuestionIndex++;
+            var newPoints = prevPoints + questions[qIndex].Answers[aIndex].Points;
+            var nextIndex = qIndex + 1;
 
-            if (step.CurrentQuestionIndex < questions.Count)
-                await SendQuestion(client, chatId, step, ct);
+            if (nextIndex < questions.Count)
+                await SendQuestion(client, chatId, nextIndex, lang, newPoints, ct);
             else
-            {
-                await SendResult(client, chatId, step, ct);
-                steps.Remove(userId);
-            }
+                await SendResult(client, chatId, userId, lang, newPoints, ct);
         }
     }
 }
@@ -346,19 +372,19 @@ async Task SendLanguageSelection(ITelegramBotClient client, long chatId, Cancell
         cancellationToken: ct);
 }
 
-async Task SendQuestion(ITelegramBotClient client, long chatId, Step step, CancellationToken ct)
+async Task SendQuestion(ITelegramBotClient client, long chatId, int qIndex, string lang, double totalPoints, CancellationToken ct)
 {
-    var lang = step.Language;
-    var q = questions[step.CurrentQuestionIndex];
+    var q = questions[qIndex];
     var questionText = q.Text.GetValueOrDefault(lang) ?? q.Text.GetValueOrDefault("en") ?? "Question";
+    var pts = totalPoints.ToString("F4", System.Globalization.CultureInfo.InvariantCulture);
 
     var buttons = q.Answers.Select((a, i) =>
     {
         var answerText = a.Text.GetValueOrDefault(lang) ?? a.Text.GetValueOrDefault("en") ?? $"Option {i + 1}";
-        return new[] { new InlineKeyboardButton(answerText) { CallbackData = $"ans:{step.CurrentQuestionIndex}:{i}" } };
+        return new[] { new InlineKeyboardButton(answerText) { CallbackData = $"ans:{qIndex}:{i}:{lang}:{pts}" } };
     }).ToArray();
 
-    var header = string.Format(Strings.Get(lang, "question_header"), step.CurrentQuestionIndex + 1, questions.Count);
+    var header = string.Format(Strings.Get(lang, "question_header"), qIndex + 1, questions.Count);
 
     await client.SendMessage(chatId,
         $"{header}\n\n{questionText}",
@@ -366,11 +392,8 @@ async Task SendQuestion(ITelegramBotClient client, long chatId, Step step, Cance
         cancellationToken: ct);
 }
 
-async Task SendResult(ITelegramBotClient client, long chatId, Step step, CancellationToken ct)
+async Task SendResult(ITelegramBotClient client, long chatId, long userId, string lang, double total, CancellationToken ct)
 {
-    var lang = step.Language;
-    var total = step.TotalPoints;
-
     var (rankKey, category) = total switch
     {
         < 0.5  => ("rank_beginner",     "Beginner"),
@@ -383,10 +406,9 @@ async Task SendResult(ITelegramBotClient client, long chatId, Step step, Cancell
     var score = total.ToString("F2");
     var link = groupLinks.GetValueOrDefault(category) ?? "https://t.me/+DEFAULT_LINK";
 
-    // Persist level and assign tag if already in monitored group
-    userLevels[step.UserId] = category;
+    userLevels[userId] = category;
     SaveUserLevels();
-    await TryAssignTagIfInGroup(client, step.UserId, category, ct);
+    await TryAssignTagIfInGroup(client, userId, category, ct);
 
     var resultMessage = string.Format(Strings.Get(lang, "result"), rank, category, score, link);
 
@@ -409,16 +431,25 @@ static class Strings
             ["rank_intermediate"] = "Intermediate",
             ["rank_advanced"]     = "Advanced",
             ["rank_expert"]       = "Expert / Pro",
+            ["welcome_group"] =
+                "🎾 Welcome to the Matchy Tennis group!\n\n" +
+                "A few reminders:\n" +
+                "• Check the daily Poll to find available slots.\n" +
+                "• Reply to the poll to find your partner.\n" +
+                "• Keep your Telegram name in the format: Nickname | Level | Rank\n\n" +
+                "Good luck and enjoy your game! 🏆",
             ["result"] =
                 "Ready to play! \ud83c\udfbe Your Matchy Rank is {0}.\n" +
-                "We've added you to the {1} group.\n\n" +
+                "We've added you to the {0} group.\n\n" +
                 "Before entering the group please change your Telegram name to:\n" +
-                "Nickname | {2} | {0}\n\n" +
+                "Nickname | {1} | {0}\n\n" +
                 "To do this go to Settings > My Account > Name.\n\n" +
-                "Join the group via the link below.\n" +
+                "Join the main group first:\n" +
+                "https://t.me/+Tb0fiNX6XT80M2Jk\n\n" +
+                "Then join your level channel:\n" +
+                "{3}\n\n" +
                 "Check the daily Poll for available slots.\n" +
-                "Reply to the poll to find your partner.\n\n" +
-                "{3}",
+                "Reply to the poll to find your partner.",
         },
         ["bg"] = new()
         {
@@ -429,16 +460,25 @@ static class Strings
             ["rank_intermediate"] = "Средно напреднал",
             ["rank_advanced"]     = "Напреднал",
             ["rank_expert"]       = "Експерт / Про",
+            ["welcome_group"] =
+                "🎾 Добре дошли в групата на Matchy Tennis!\n\n" +
+                "Няколко напомняния:\n" +
+                "• Проверявайте ежедневната анкета за свободни места.\n" +
+                "• Отговорете на анкетата, за да намерите партньор.\n" +
+                "• Запазете Telegram името си във формат: Псевдоним | Ниво | Ранг\n\n" +
+                "Успех и приятна игра! 🏆",
             ["result"] =
                 "Готови за игра! \ud83c\udfbe Вашият Matchy ранг е {0}.\n" +
-                "Добавихме ви в групата {1}.\n\n" +
+                "Добавихме ви в групата {0}.\n\n" +
                 "Преди да влезете в групата, моля променете името си в Telegram на:\n" +
-                "Псевдоним | {2} | {0}\n\n" +
+                "Псевдоним | {1} | {0}\n\n" +
                 "За целта отидете в Настройки > Моят акаунт > Име.\n\n" +
-                "Влезте в групата чрез линка по-долу.\n" +
+                "Първо влезте в основната група:\n" +
+                "https://t.me/+Tb0fiNX6XT80M2Jk\n\n" +
+                "След това влезте в канала за вашето ниво:\n" +
+                "{3}\n\n" +
                 "Проверете ежедневната анкета за свободни места.\n" +
-                "Отговорете на анкетата, за да намерите партньор.\n\n" +
-                "{3}",
+                "Отговорете на анкетата, за да намерите партньор.",
         },
     };
 
@@ -456,8 +496,6 @@ static class Strings
 // ──────────────────────────────────────────────
 enum StepStage
 {
-    SelectingLanguage,
-    AnsweringQuestions,
     EditingQuestions
 }
 
@@ -466,9 +504,6 @@ class Step(long userId, long chatId, StepStage stage)
     public long UserId { get; } = userId;
     public long ChatId { get; } = chatId;
     public StepStage Stage { get; set; } = stage;
-    public string Language { get; set; } = "en";
-    public int CurrentQuestionIndex { get; set; }
-    public double TotalPoints { get; set; }
 }
 
 class QuestionFile
